@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>タイマー</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: #1a1a2e;
+    color: #eee;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+  }
+
+  .container {
+    text-align: center;
+    padding: 40px 32px;
+    background: #16213e;
+    border-radius: 24px;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+    width: 340px;
+  }
+
+  h1 {
+    font-size: 15px;
+    font-weight: 500;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    color: #7c83fd;
+    margin-bottom: 36px;
+  }
+
+  .display {
+    font-size: 88px;
+    font-weight: 200;
+    letter-spacing: -2px;
+    line-height: 1;
+    color: #fff;
+    margin-bottom: 10px;
+    font-variant-numeric: tabular-nums;
+    transition: color 0.3s;
+  }
+
+  .display.urgent { color: #ff6b6b; }
+  .display.done   { color: #6bffb8; }
+
+  .progress-ring {
+    position: relative;
+    width: 200px;
+    height: 200px;
+    margin: 0 auto 32px;
+  }
+
+  .progress-ring svg {
+    transform: rotate(-90deg);
+    position: absolute;
+    top: 0; left: 0;
+  }
+
+  .progress-ring .display {
+    position: absolute;
+    width: 100%;
+    top: 50%;
+    transform: translateY(-50%);
+  }
+
+  circle.track {
+    fill: none;
+    stroke: #0f3460;
+    stroke-width: 6;
+  }
+
+  circle.progress {
+    fill: none;
+    stroke: #7c83fd;
+    stroke-width: 6;
+    stroke-linecap: round;
+    transition: stroke-dashoffset 1s linear, stroke 0.3s;
+  }
+
+  circle.progress.urgent { stroke: #ff6b6b; }
+  circle.progress.done   { stroke: #6bffb8; }
+
+  .presets {
+    display: flex;
+    gap: 8px;
+    justify-content: center;
+    margin-bottom: 24px;
+  }
+
+  .preset-btn {
+    background: #0f3460;
+    border: 2px solid transparent;
+    color: #aaa;
+    border-radius: 12px;
+    padding: 8px 0;
+    width: 64px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+
+  .preset-btn:hover { background: #1a4a8a; color: #fff; }
+
+  .preset-btn.active {
+    border-color: #7c83fd;
+    color: #7c83fd;
+    background: #1a1a3e;
+  }
+
+  .adjusters {
+    display: flex;
+    gap: 6px;
+    justify-content: center;
+    margin-bottom: 16px;
+  }
+
+  .adj-btn {
+    background: #0f3460;
+    border: none;
+    color: #aaa;
+    border-radius: 10px;
+    padding: 7px 0;
+    flex: 1;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+
+  .adj-btn:hover { background: #1a4a8a; color: #fff; }
+  .adj-btn:active { transform: scale(0.95); }
+
+  .start-btn {
+    width: 100%;
+    padding: 16px;
+    border: none;
+    border-radius: 14px;
+    background: #7c83fd;
+    color: #fff;
+    font-size: 18px;
+    font-weight: 600;
+    cursor: pointer;
+    letter-spacing: 1px;
+    transition: all 0.2s;
+  }
+
+  .start-btn:hover  { background: #9da2ff; transform: translateY(-1px); }
+  .start-btn:active { transform: translateY(0); }
+  .start-btn.running { background: #444; }
+  .start-btn.running:hover { background: #555; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Timer</h1>
+
+  <div class="progress-ring">
+    <svg width="200" height="200" viewBox="0 0 200 200">
+      <circle class="track"    cx="100" cy="100" r="88"/>
+      <circle class="progress" cx="100" cy="100" r="88" id="ring"/>
+    </svg>
+    <div class="display" id="display">3:00</div>
+  </div>
+
+  <div class="presets">
+    <button class="preset-btn" onclick="setPreset(1)">1分</button>
+    <button class="preset-btn active" onclick="setPreset(3)">3分</button>
+    <button class="preset-btn" onclick="setPreset(5)">5分</button>
+    <button class="preset-btn" onclick="setPreset(10)">10分</button>
+  </div>
+
+  <div class="adjusters">
+    <button class="adj-btn" onclick="adjust(-60)">−1分</button>
+    <button class="adj-btn" onclick="adjust(-30)">−30秒</button>
+    <button class="adj-btn" onclick="adjust(30)">+30秒</button>
+    <button class="adj-btn" onclick="adjust(60)">+1分</button>
+  </div>
+
+  <button class="start-btn" id="startBtn" onclick="toggle()">スタート</button>
+</div>
+
+<script>
+  const CIRCUMFERENCE = 2 * Math.PI * 88;
+  const ring = document.getElementById('ring');
+  const display = document.getElementById('display');
+  const startBtn = document.getElementById('startBtn');
+  ring.style.strokeDasharray = CIRCUMFERENCE;
+
+  let totalSeconds = 180;
+  let remaining = 180;
+  let timer = null;
+  let running = false;
+
+  function setPreset(minutes) {
+    if (running) return;
+    document.querySelectorAll('.preset-btn').forEach(b => b.classList.remove('active'));
+    event.target.classList.add('active');
+    totalSeconds = minutes * 60;
+    remaining = totalSeconds;
+    updateDisplay();
+    resetRing();
+  }
+
+  function adjust(seconds) {
+    if (running) return;
+    totalSeconds = Math.max(30, totalSeconds + seconds);
+    remaining = totalSeconds;
+    document.querySelectorAll('.preset-btn').forEach(b => b.classList.remove('active'));
+    updateDisplay();
+    resetRing();
+  }
+
+  function toggle() {
+    if (running) {
+      pause();
+    } else {
+      start();
+    }
+  }
+
+  function start() {
+    if (remaining <= 0) {
+      remaining = totalSeconds;
+      updateDisplay();
+      resetRing();
+    }
+    running = true;
+    startBtn.textContent = 'リセット';
+    startBtn.classList.add('running');
+    tick();
+    timer = setInterval(tick, 1000);
+  }
+
+  function pause() {
+    clearInterval(timer);
+    running = false;
+    remaining = totalSeconds;
+    updateDisplay();
+    resetRing();
+    display.classList.remove('urgent', 'done');
+    ring.classList.remove('urgent', 'done');
+    startBtn.textContent = 'スタート';
+    startBtn.classList.remove('running');
+  }
+
+  function tick() {
+    updateDisplay();
+    updateRing();
+    if (remaining <= 10) {
+      display.classList.add('urgent');
+      ring.classList.add('urgent');
+    }
+    if (remaining <= 0) {
+      finish();
+      return;
+    }
+    remaining--;
+  }
+
+  function finish() {
+    clearInterval(timer);
+    running = false;
+    display.classList.remove('urgent');
+    display.classList.add('done');
+    ring.classList.remove('urgent');
+    ring.classList.add('done');
+    startBtn.textContent = 'スタート';
+    startBtn.classList.remove('running');
+    playAlarm();
+  }
+
+  function updateDisplay() {
+    const m = Math.floor(remaining / 60);
+    const s = remaining % 60;
+    display.textContent = `${m}:${String(s).padStart(2, '0')}`;
+  }
+
+  function updateRing() {
+    const fraction = totalSeconds > 0 ? remaining / totalSeconds : 0;
+    ring.style.strokeDashoffset = CIRCUMFERENCE * (1 - fraction);
+  }
+
+  function resetRing() {
+    ring.style.strokeDashoffset = 0;
+  }
+
+  function playAlarm() {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+
+    const beeps = [
+      { freq: 880, start: 0,    dur: 0.12 },
+      { freq: 880, start: 0.15, dur: 0.12 },
+      { freq: 1320,start: 0.30, dur: 0.55 },
+    ];
+
+    beeps.forEach(({ freq, start, dur }) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.type = 'sine';
+      osc.frequency.value = freq;
+      const t = ctx.currentTime + start;
+      gain.gain.setValueAtTime(0, t);
+      gain.gain.linearRampToValueAtTime(0.4, t + 0.01);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + dur);
+      osc.start(t);
+      osc.stop(t + dur + 0.05);
+    });
+
+    setTimeout(() => {
+      display.classList.remove('done');
+      ring.classList.remove('done');
+    }, 2000);
+  }
+
+  updateDisplay();
+  resetRing();
+</script>
+</body>
+</html>
