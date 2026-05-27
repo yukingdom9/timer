@@ -62,6 +62,15 @@
   .display.urgent { color: #ff6b6b; }
   .display.done   { color: #6bffb8; }
 
+  /* 音声保留中の視覚フィードバック（pendingAlarm） */
+  @keyframes alarm-pulse {
+    0%, 100% { opacity: 1; }
+    50%       { opacity: 0.2; }
+  }
+  .display.pending-alarm {
+    animation: alarm-pulse 0.5s ease-in-out infinite;
+  }
+
   .progress-ring {
     position: relative;
     width: 200px;
@@ -200,87 +209,134 @@
 </div>
 
 <script>
-  const CIRCUMFERENCE = 2 * Math.PI * 88;
-  const ring    = document.getElementById('ring');
-  const display = document.getElementById('display');
-  const startBtn = document.getElementById('startBtn');
+  var CIRCUMFERENCE = 2 * Math.PI * 88;
+  var ring     = document.getElementById('ring');
+  var display  = document.getElementById('display');
+  var startBtn = document.getElementById('startBtn');
   ring.style.strokeDasharray = CIRCUMFERENCE;
 
-  let totalSeconds = 180;
-  let remaining    = 180;
-  let running      = false;
-  let worker       = null;
+  var totalSeconds = 180;
+  var remaining    = 180;
+  var running      = false;
+  var worker       = null;
 
   // =====================================================================
-  // iOS Safari / PWA 音声アンロック戦略
+  // iOS Safari / PWA 音声アンロック — 完全版
   // =====================================================================
-  // iOS の制限：
-  //   1. AudioContext は生成直後 state === 'suspended' で停止している
-  //   2. ctx.resume() はユーザージェスチャー（touchstart / click）の
-  //      同期コールスタック内でしか機能しない
-  //   3. バックグラウンド復帰時に再び suspended になることがある
-  //   4. 無音バッファを一度再生しないと古い iOS では完全にアンロックされない
-  //   5. ハードウェアのサイレントスイッチ：
-  //      - <audio> / <video> 要素 → サイレント時は無音
-  //      - WebAudio API (AudioContext) → iOS 13+ ではサイレント無関係に鳴る ✅
-  //      → MP3 ではなく WebAudio API を使う理由はここにある
   //
-  // 解決策：
-  //   ・スタートボタン押下（= ユーザージェスチャー内）で resume() + 無音再生
-  //   ・作成した ctx を使い回し、アラーム時は ctx が running 状態を前提とする
-  //   ・visibilitychange で復帰時にも resume() を試みる
+  // ■ なぜ PC では動くのか
+  //   PC Chrome/Firefox は AudioContext.resume() をジェスチャー外からでも
+  //   呼べる。Autoplay Policy が iOS ほど厳格ではない。
+  //
+  // ■ なぜ iPhone で動かないのか（5層の制限）
+  //   Layer 1: AudioContext 生成直後は state === 'suspended' で止まる
+  //   Layer 2: resume() はユーザージェスチャーの【同期スタック内】でしか効かない
+  //            → async/await を挟むと iOS では gesture trust が失われることがある
+  //            → 前実装の async function start() + await が問題だった
+  //   Layer 3: 無音バッファを一度再生しないと古い iOS では完全にアンロックされない
+  //   Layer 4: PWA バックグラウンド時に AudioContext が自動で suspended に戻る
+  //   Layer 5: タイマー終了時に AudioContext が suspended だと音が出ない
+  //
+  // ■ なぜ PWA で特に失敗するのか
+  //   Safari ブラウザタブより PWA standalone モードの方が制限が厳しい。
+  //   スリープ復帰後の AudioContext は suspended になるが、
+  //   その状態で resume() を呼んでも gesture trust がないと失敗する。
+  //
+  // ■ ハードウェアサイレントスイッチ
+  //   <audio>/<video> → サイレント時は無音になる
+  //   WebAudio API    → iOS 13+ ではサイレントスイッチの影響なし ✅
+  //   → MP3 ではなく WebAudio API を使う理由がここにある
+  //
+  // ■ 解決策
+  //   A. resume() を async/await を一切介さず同期スタックで直接呼ぶ
+  //   B. pendingAlarm フラグで「鳴らし忘れ」を追跡
+  //   C. visibilitychange / touchstart で pendingAlarm を消化
+  //   D. 音が出せなかった場合は表示を点滅させてフィードバック
   // =====================================================================
 
-  const AC = window.AudioContext || window.webkitAudioContext;
-  let audioCtx = null;          // シングルトン。一度作ったら使い回す
-  let audioReady = false;       // 無音バッファ再生まで完了したか
+  var AC           = window.AudioContext || window.webkitAudioContext;
+  var audioCtx     = null;   // シングルトン。一度作ったら破棄しない
+  var audioReady   = false;  // 無音バッファ再生完了 = 完全アンロック済み
+  var pendingAlarm = false;  // タイマー終了時に音が出せなかった場合 true
 
-  /**
-   * ユーザージェスチャー内から呼ぶ。
-   * AudioContext の生成・resume・無音バッファ再生 をすべて行う。
-   */
-  async function ensureAudioUnlocked() {
+  // ------------------------------------------------------------------
+  // 無音バッファ再生 → iOS の完全アンロック完了
+  // audioCtx.state === 'running' のときだけ呼ぶこと
+  // ------------------------------------------------------------------
+  function playSilentBuffer() {
+    if (!audioCtx || audioCtx.state !== 'running' || audioReady) return;
+    var buf = audioCtx.createBuffer(1, 1, audioCtx.sampleRate);
+    var src = audioCtx.createBufferSource();
+    src.buffer = buf;
+    src.connect(audioCtx.destination);
+    src.start(0);
+    audioReady = true;
+  }
+
+  // ------------------------------------------------------------------
+  // pendingAlarm があり今すぐ音を出せる状態なら再生
+  // ------------------------------------------------------------------
+  function checkPendingAlarm() {
+    if (!pendingAlarm) return;
+    if (!audioCtx || audioCtx.state !== 'running') return;
+    pendingAlarm = false;
+    display.classList.remove('pending-alarm');
+    scheduleBeeps(audioCtx);
+  }
+
+  // ------------------------------------------------------------------
+  // ★ iOS で最重要: resume() を async/await を一切介さず
+  //    ユーザージェスチャーの【同期スタック内】で直接呼ぶ。
+  //    toggle() / setPreset() / adjust() から直接呼ぶ。
+  //    body touchstart / click リスナーからも呼ぶ。
+  // ------------------------------------------------------------------
+  function unlockAudioSync() {
     if (!AC) return;
 
-    // 初回のみ AudioContext を生成
+    // 初回のみ生成（ジェスチャー前の生成自体は問題なし）
     if (!audioCtx) {
       audioCtx = new AC();
     }
 
-    // suspended なら resume（ジェスチャー内でないと iOS では効かない）
     if (audioCtx.state === 'suspended') {
-      try {
-        await audioCtx.resume();
-      } catch (e) {
-        console.warn('AudioContext resume failed:', e);
-        return;
-      }
-    }
+      // resume() を【同期で発行】→ iOS の gesture trust が有効な間に呼ぶ
+      audioCtx.resume().then(function () {
+        playSilentBuffer();
+        checkPendingAlarm();
+      }).catch(function () {});
 
-    // running になったら無音バッファで完全アンロック（iOS 旧バージョン対策）
-    if (audioCtx.state === 'running' && !audioReady) {
-      const silentBuf = audioCtx.createBuffer(1, 1, audioCtx.sampleRate);
-      const src = audioCtx.createBufferSource();
-      src.buffer = silentBuf;
-      src.connect(audioCtx.destination);
-      src.start(0);
-      audioReady = true;
+    } else if (audioCtx.state === 'running') {
+      playSilentBuffer();
+      checkPendingAlarm();
     }
+    // state === 'closed' は何もしない（再生成しない）
   }
 
-  // バックグラウンド復帰時（PWA スリープ後など）に suspended に戻ることがある
-  // → 再びアクティブになった瞬間に resume を試みる
+  // ------------------------------------------------------------------
+  // バックグラウンド復帰時: suspended に戻った ctx を resume する。
+  // pendingAlarm があれば消化する。
+  // ------------------------------------------------------------------
   document.addEventListener('visibilitychange', function () {
-    if (document.visibilityState === 'visible' && audioCtx && audioCtx.state === 'suspended') {
-      audioCtx.resume().catch(() => {});
+    if (document.visibilityState !== 'visible') return;
+    if (!audioCtx) return;
+    if (audioCtx.state === 'suspended') {
+      audioCtx.resume().then(function () {
+        playSilentBuffer();
+        checkPendingAlarm();
+      }).catch(function () {});
+    } else if (audioCtx.state === 'running') {
+      checkPendingAlarm();
     }
   });
 
-  // PWA ホーム画面起動直後は初回タップ前まで suspended のまま。
-  // bodyへの最初のタッチでも unlock を試みることで
-  // ユーザーがスタートボタン以外を先にタップした場合もカバーする。
-  document.body.addEventListener('touchstart', ensureAudioUnlocked, { passive: true });
-  document.body.addEventListener('click',      ensureAudioUnlocked, { passive: true });
+  // body への touchstart / click でも unlock + pendingAlarm 消化
+  // （スタートボタン以外を最初にタップしたケースもカバー）
+  document.body.addEventListener('touchstart', function () {
+    unlockAudioSync();
+  }, { passive: true });
+  document.body.addEventListener('click', function () {
+    unlockAudioSync();
+  }, { passive: true });
 
   // ---- Service Worker --------------------------------------------------
   if ('serviceWorker' in navigator) {
@@ -297,34 +353,31 @@
 
   // ---- Web Worker (inline via Blob) ------------------------------------
   // バックグラウンドタブでも throttle されない独立スレッドで動作する。
-  // Date.now() で実経過時間を測るため、インターバルがズレても
-  // 表示される残り秒数は常に正確に保たれる。
-  const workerCode = `
-    let intervalId = null;
-    let deadline = 0;
+  // Date.now() で実経過時間を測るためインターバルがズレても残り秒数は正確。
+  var workerCode = [
+    'var intervalId = null;',
+    'var deadline = 0;',
+    'self.onmessage = function(e) {',
+    '  if (e.data.type === "start") {',
+    '    clearInterval(intervalId);',
+    '    deadline = Date.now() + e.data.seconds * 1000;',
+    '    intervalId = setInterval(function() {',
+    '      var msLeft = deadline - Date.now();',
+    '      var remaining = Math.max(0, Math.ceil(msLeft / 1000));',
+    '      self.postMessage({ type: "tick", remaining: remaining });',
+    '      if (remaining <= 0) {',
+    '        clearInterval(intervalId);',
+    '        self.postMessage({ type: "done" });',
+    '      }',
+    '    }, 250);',
+    '  } else if (e.data.type === "stop") {',
+    '    clearInterval(intervalId);',
+    '  }',
+    '};'
+  ].join('\n');
 
-    self.onmessage = function(e) {
-      if (e.data.type === 'start') {
-        clearInterval(intervalId);
-        deadline = Date.now() + e.data.seconds * 1000;
-
-        intervalId = setInterval(function() {
-          const msLeft = deadline - Date.now();
-          const remaining = Math.max(0, Math.ceil(msLeft / 1000));
-          self.postMessage({ type: 'tick', remaining: remaining });
-          if (remaining <= 0) {
-            clearInterval(intervalId);
-            self.postMessage({ type: 'done' });
-          }
-        }, 250);  // 250ms ポーリングで 1 秒単位の切り替わりを確実に捉える
-
-      } else if (e.data.type === 'stop') {
-        clearInterval(intervalId);
-      }
-    };
-  `;
-  const blob      = new Blob([workerCode], { type: 'application/javascript' });
-  const workerUrl = URL.createObjectURL(blob);
+  var blob      = new Blob([workerCode], { type: 'application/javascript' });
+  var workerUrl = URL.createObjectURL(blob);
 
   function createWorker() {
     if (worker) worker.terminate();
@@ -347,37 +400,45 @@
 
   function setPreset(minutes, evt) {
     if (running) return;
-    document.querySelectorAll('.preset-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.preset-btn').forEach(function (b) { b.classList.remove('active'); });
     if (evt && evt.target) evt.target.classList.add('active');
     totalSeconds = minutes * 60;
     remaining    = totalSeconds;
     updateDisplay();
     resetRing();
-    // プリセットタップもジェスチャーなのでここでもアンロック
-    ensureAudioUnlocked();
+    unlockAudioSync(); // タップ = ジェスチャー → アンロック
   }
 
   function adjust(seconds) {
     if (running) return;
     totalSeconds = Math.max(30, totalSeconds + seconds);
     remaining    = totalSeconds;
-    document.querySelectorAll('.preset-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.preset-btn').forEach(function (b) { b.classList.remove('active'); });
     updateDisplay();
     resetRing();
-    ensureAudioUnlocked();
+    unlockAudioSync();
   }
 
+  // ★ toggle() は非 async のまま維持する。
+  //    async にすると Promise が返り、onclick の同期スタックが分断される。
   function toggle() {
-    running ? reset() : start();
+    if (running) {
+      reset();
+    } else {
+      // ① まず同期スタック内で resume() を発行（iOS gesture trust が有効な間）
+      unlockAudioSync();
+      // ② その後タイマー起動（同期）
+      start();
+    }
   }
 
-  async function start() {
-    // ★ iOS 最重要ポイント：
-    //    ユーザージェスチャー（スタートボタン押下）の同期コールスタック内で
-    //    resume() を呼ぶ。await の前に AudioContext 生成・resume を完了させる。
-    await ensureAudioUnlocked();
-
-    running = true;
+  // ★ start() も非 async。
+  //    アンロックは呼び元 toggle() の unlockAudioSync() で完了済み。
+  //    async にしていたことが前バージョンで動かなかった主因の一つ。
+  function start() {
+    running      = true;
+    pendingAlarm = false;
+    display.classList.remove('pending-alarm');
     startBtn.textContent = 'リセット';
     startBtn.classList.add('running');
     display.classList.remove('urgent', 'done');
@@ -390,8 +451,10 @@
 
   function reset() {
     if (worker) { worker.postMessage({ type: 'stop' }); worker.terminate(); worker = null; }
-    running   = false;
-    remaining = totalSeconds;
+    running      = false;
+    remaining    = totalSeconds;
+    pendingAlarm = false;
+    display.classList.remove('pending-alarm');
     updateDisplay();
     resetRing();
     display.classList.remove('urgent', 'done');
@@ -412,91 +475,88 @@
     playAlarm();
   }
 
-  function updateDisplay() {
-    const m = Math.floor(remaining / 60);
-    const s = remaining % 60;
-    display.textContent = `${m}:${String(s).padStart(2, '0')}`;
-  }
-
-  function updateRing() {
-    const fraction = totalSeconds > 0 ? remaining / totalSeconds : 0;
-    ring.style.strokeDashoffset = CIRCUMFERENCE * (1 - fraction);
-  }
-
-  function resetRing() {
-    ring.style.strokeDashoffset = 0;
-  }
-
-  /**
-   * WebAudio API でビープ音を生成して再生する。
-   *
-   * ★ この関数はタイマー終了時（= Workerのメッセージ受信 = ジェスチャー外）
-   *    から呼ばれる。そのため ctx.resume() はここでは効かない。
-   *    スタートボタン押下時に ensureAudioUnlocked() で完全に running に
-   *    しておくことが前提。
-   *
-   * サイレントスイッチについて：
-   *   WebAudio API は iOS 13+ でサイレントスイッチの影響を受けない。
-   *   ただしユーザーが音量を 0 にしていれば当然無音になる（仕様）。
-   */
+  // ------------------------------------------------------------------
+  // playAlarm: ジェスチャー外（Worker done message）から呼ばれる。
+  //
+  // ctx が running → 即時再生。
+  // ctx が suspended → pendingAlarm を立て、次のジェスチャー /
+  //                    visibilitychange で消化する（表示を点滅）。
+  // ------------------------------------------------------------------
   function playAlarm() {
     if (!audioCtx) {
-      // スタートが押されていれば必ず存在するはず。念のため。
-      console.warn('AudioContext が初期化されていません。スタートボタンを押してください。');
+      // スタートが押されていれば必ず存在するはず
+      pendingAlarm = true;
+      display.classList.remove('done');
+      display.classList.add('pending-alarm');
       return;
     }
 
-    // バックグラウンド復帰直後などで suspended になっていれば
-    // 再生を少し遅らせて resume を試みる（ジェスチャー外なので成功しない
-    // こともあるが、試みるだけ試みる）
-    if (audioCtx.state !== 'running') {
-      audioCtx.resume().then(() => scheduleBeeps(audioCtx)).catch(() => {});
+    if (audioCtx.state === 'running') {
+      scheduleBeeps(audioCtx);
       return;
     }
 
-    scheduleBeeps(audioCtx);
+    // suspended: pendingAlarm を立てる
+    pendingAlarm = true;
+    display.classList.add('pending-alarm');
+
+    // resume() を試みる。画面復帰直後なら成功する場合がある
+    audioCtx.resume().then(function () {
+      playSilentBuffer();
+      checkPendingAlarm();
+    }).catch(function () {});
   }
 
-  /**
-   * 実際のビープ音スケジューリング。
-   * ctx が running 状態であることを前提として呼ぶ。
-   *
-   * 音の構成：
-   *   ・880 Hz (ラ)  × 2回 → 注意を引く短いビープ
-   *   ・1320 Hz (ミ) × 1回 → 高めの余韻で終了を知らせる
-   */
+  // ------------------------------------------------------------------
+  // scheduleBeeps: ctx が running 状態を前提として呼ぶ。
+  //
+  // 音の構成:
+  //   880 Hz (ラ) × 2回 → 注意を引く短いビープ
+  //   1320 Hz (ミ) × 1回 → 高めの余韻で終了を知らせる
+  //
+  // WebAudio API なのでサイレントスイッチ (iOS 13+) の影響を受けない。
+  // ------------------------------------------------------------------
   function scheduleBeeps(ctx) {
-    const beeps = [
+    var beeps = [
       { freq: 880,  start: 0,    dur: 0.12 },
       { freq: 880,  start: 0.18, dur: 0.12 },
       { freq: 1320, start: 0.36, dur: 0.60 },
     ];
 
-    beeps.forEach(({ freq, start, dur }) => {
-      const osc  = ctx.createOscillator();
-      const gain = ctx.createGain();
+    beeps.forEach(function (b) {
+      var osc  = ctx.createOscillator();
+      var gain = ctx.createGain();
       osc.connect(gain);
       gain.connect(ctx.destination);
-
       osc.type = 'sine';
-      osc.frequency.value = freq;
-
-      const t = ctx.currentTime + start;
-      // アタック：急峻なクリックノイズを避けるため 10ms でフェードイン
+      osc.frequency.value = b.freq;
+      var t = ctx.currentTime + b.start;
       gain.gain.setValueAtTime(0, t);
-      gain.gain.linearRampToValueAtTime(0.45, t + 0.01);
-      // ディケイ：自然な余韻でフェードアウト
-      gain.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-
+      gain.gain.linearRampToValueAtTime(0.45, t + 0.01);   // 10ms アタック
+      gain.gain.exponentialRampToValueAtTime(0.0001, t + b.dur);
       osc.start(t);
-      osc.stop(t + dur + 0.05);
+      osc.stop(t + b.dur + 0.05);
     });
 
-    // 2 秒後に done スタイルをリセット
-    setTimeout(() => {
+    setTimeout(function () {
       display.classList.remove('done');
       ring.classList.remove('done');
     }, 2000);
+  }
+
+  function updateDisplay() {
+    var m = Math.floor(remaining / 60);
+    var s = remaining % 60;
+    display.textContent = m + ':' + String(s).padStart(2, '0');
+  }
+
+  function updateRing() {
+    var fraction = totalSeconds > 0 ? remaining / totalSeconds : 0;
+    ring.style.strokeDashoffset = CIRCUMFERENCE * (1 - fraction);
+  }
+
+  function resetRing() {
+    ring.style.strokeDashoffset = 0;
   }
 
   updateDisplay();
