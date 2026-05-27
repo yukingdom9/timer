@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <meta name="theme-color" content="#1a1a2e">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="Timer">
@@ -11,13 +11,19 @@
 <link rel="apple-touch-icon" href="./icons/apple-touch-icon.svg">
 <title>タイマー</title>
 <style>
-  * { box-sizing: border-box; margin: 0; padding: 0; }
+  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
 
   html, body {
     min-height: 100%;
     background: #1a1a2e;
     color: #eee;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    /* ダブルタップズーム・テキスト選択を無効化 */
+    touch-action: manipulation;
+    user-select: none;
+    -webkit-user-select: none;
+    /* iOS Safariのフォントサイズ自動調整を無効化 */
+    -webkit-text-size-adjust: 100%;
   }
 
   body {
@@ -28,6 +34,15 @@
     padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
     padding: constant(safe-area-inset-top) constant(safe-area-inset-right) constant(safe-area-inset-bottom) constant(safe-area-inset-left);
     background-color: #1a1a2e;
+    /* プルダウン更新・バウンススクロールを無効化 */
+    overscroll-behavior: none;
+  }
+
+  /* ボタン類のダブルタップズームを個別に封じる */
+  button {
+    touch-action: manipulation;
+    user-select: none;
+    -webkit-user-select: none;
   }
 
   .container {
@@ -337,6 +352,21 @@
   document.body.addEventListener('click', function () {
     unlockAudioSync();
   }, { passive: true });
+
+  // ----------------------------------------------------------------
+  // ダブルタップズーム 追加保険 (iOS Safari / PWA)
+  // CSS touch-action: manipulation だけでは古い iOS や特定の要素で
+  // ズームが発生するケースがあるため、300ms 以内の連続タップを
+  // preventDefault() で打ち消す。
+  // ----------------------------------------------------------------
+  var lastTap = 0;
+  document.addEventListener('touchend', function (e) {
+    var now = Date.now();
+    if (now - lastTap < 300) {
+      e.preventDefault(); // ダブルタップズームをキャンセル
+    }
+    lastTap = now;
+  }, { passive: false });
 
   // ---- Service Worker --------------------------------------------------
   if ('serviceWorker' in navigator) {
