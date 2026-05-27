@@ -3,18 +3,31 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#1a1a2e">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Timer">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="manifest" href="./manifest.json">
+<link rel="apple-touch-icon" href="./icons/apple-touch-icon.svg">
 <title>タイマー</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
 
-  body {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  html, body {
+    min-height: 100%;
     background: #1a1a2e;
     color: #eee;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+
+  body {
     display: flex;
     justify-content: center;
     align-items: center;
     min-height: 100vh;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+    padding: constant(safe-area-inset-top) constant(safe-area-inset-right) constant(safe-area-inset-bottom) constant(safe-area-inset-left);
+    background-color: #1a1a2e;
   }
 
   .container {
@@ -170,10 +183,10 @@
   </div>
 
   <div class="presets">
-    <button class="preset-btn" onclick="setPreset(1)">1分</button>
-    <button class="preset-btn active" onclick="setPreset(3)">3分</button>
-    <button class="preset-btn" onclick="setPreset(5)">5分</button>
-    <button class="preset-btn" onclick="setPreset(10)">10分</button>
+    <button class="preset-btn" onclick="setPreset(1,event)">1分</button>
+    <button class="preset-btn active" onclick="setPreset(3,event)">3分</button>
+    <button class="preset-btn" onclick="setPreset(5,event)">5分</button>
+    <button class="preset-btn" onclick="setPreset(10,event)">10分</button>
   </div>
 
   <div class="adjusters">
@@ -197,6 +210,34 @@
   let remaining = 180;
   let running = false;
   let worker = null;
+  let audioContext = null;
+  let audioUnlocked = false;
+
+  function unlockAudioContext() {
+    if (audioUnlocked) return;
+    const AudioContext = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContext) return;
+    audioContext = new AudioContext();
+    if (audioContext.state === 'suspended') {
+      audioContext.resume().catch(() => {});
+    }
+    audioUnlocked = true;
+  }
+
+  document.body.addEventListener('click', unlockAudioContext, { once: true, passive: true });
+  document.body.addEventListener('touchstart', unlockAudioContext, { once: true, passive: true });
+
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', function() {
+      navigator.serviceWorker.register('./sw.js').catch(function(err) {
+        console.warn('ServiceWorker registration failed:', err);
+      });
+    });
+  }
+
+  window.addEventListener('appinstalled', function() {
+    console.log('PWA installed');
+  });
 
   // ---- Web Worker (inline via Blob) --------------------------------
   // バックグラウンドタブでも throttle されない独立スレッドで動作する。
@@ -248,10 +289,10 @@
   }
   // ------------------------------------------------------------------
 
-  function setPreset(minutes) {
+  function setPreset(minutes, evt) {
     if (running) return;
     document.querySelectorAll('.preset-btn').forEach(b => b.classList.remove('active'));
-    event.target.classList.add('active');
+    if (evt && evt.target) evt.target.classList.add('active');
     totalSeconds = minutes * 60;
     remaining = totalSeconds;
     updateDisplay();
@@ -323,7 +364,13 @@
   }
 
   function playAlarm() {
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    if (!audioUnlocked) {
+      unlockAudioContext();
+    }
+    const ctx = audioContext || new (window.AudioContext || window.webkitAudioContext)();
+    if (ctx.state === 'suspended') {
+      ctx.resume().catch(() => {});
+    }
 
     const beeps = [
       { freq: 880,  start: 0,    dur: 0.12 },

@@ -1,0 +1,22 @@
+{
+  "name": "Timer",
+  "short_name": "Timer",
+  "description": "シンプルなホーム画面追加対応タイマー。オフラインで起動でき、iOS Safariのスタンドアロン表示に対応します。",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#1a1a2e",
+  "theme_color": "#1a1a2e",
+  "icons": [
+    {
+      "src": "./icons/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    },
+    {
+      "src": "./icons/apple-touch-icon.svg",
+      "sizes": "180x180",
+      "type": "image/svg+xml"
+    }
+  ]
+}
