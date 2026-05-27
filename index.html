@@ -195,8 +195,58 @@
 
   let totalSeconds = 180;
   let remaining = 180;
-  let timer = null;
   let running = false;
+  let worker = null;
+
+  // ---- Web Worker (inline via Blob) --------------------------------
+  // バックグラウンドタブでも throttle されない独立スレッドで動作する。
+  // さらに Date.now() で実経過時間を測るため、インターバル自体がズレても
+  // 表示される残り秒数は常に正確に保たれる。
+  const workerCode = `
+    let intervalId = null;
+    let deadline = 0;   // 終了予定の Date.now() 値
+
+    self.onmessage = function(e) {
+      if (e.data.type === 'start') {
+        clearInterval(intervalId);
+        deadline = Date.now() + e.data.seconds * 1000;
+
+        intervalId = setInterval(function() {
+          const msLeft = deadline - Date.now();
+          const remaining = Math.max(0, Math.ceil(msLeft / 1000));
+          self.postMessage({ type: 'tick', remaining: remaining });
+          if (remaining <= 0) {
+            clearInterval(intervalId);
+            self.postMessage({ type: 'done' });
+          }
+        }, 250);   // 250ms ポーリングで 1 秒単位の切り替わりを確実に捉える
+
+      } else if (e.data.type === 'stop') {
+        clearInterval(intervalId);
+      }
+    };
+  `;
+  const blob = new Blob([workerCode], { type: 'application/javascript' });
+  const workerUrl = URL.createObjectURL(blob);
+
+  function createWorker() {
+    if (worker) worker.terminate();
+    worker = new Worker(workerUrl);
+    worker.onmessage = function(e) {
+      if (e.data.type === 'tick') {
+        remaining = e.data.remaining;
+        updateDisplay();
+        updateRing();
+        if (remaining <= 10) {
+          display.classList.add('urgent');
+          ring.classList.add('urgent');
+        }
+      } else if (e.data.type === 'done') {
+        finish();
+      }
+    };
+  }
+  // ------------------------------------------------------------------
 
   function setPreset(minutes) {
     if (running) return;
@@ -218,28 +268,23 @@
   }
 
   function toggle() {
-    if (running) {
-      pause();
-    } else {
-      start();
-    }
+    running ? reset() : start();
   }
 
   function start() {
-    if (remaining <= 0) {
-      remaining = totalSeconds;
-      updateDisplay();
-      resetRing();
-    }
     running = true;
     startBtn.textContent = 'リセット';
     startBtn.classList.add('running');
-    tick();
-    timer = setInterval(tick, 1000);
+    display.classList.remove('urgent', 'done');
+    ring.classList.remove('urgent', 'done');
+    updateDisplay();
+    updateRing();
+    createWorker();
+    worker.postMessage({ type: 'start', seconds: remaining });
   }
 
-  function pause() {
-    clearInterval(timer);
+  function reset() {
+    if (worker) { worker.postMessage({ type: 'stop' }); worker.terminate(); worker = null; }
     running = false;
     remaining = totalSeconds;
     updateDisplay();
@@ -250,22 +295,8 @@
     startBtn.classList.remove('running');
   }
 
-  function tick() {
-    updateDisplay();
-    updateRing();
-    if (remaining <= 10) {
-      display.classList.add('urgent');
-      ring.classList.add('urgent');
-    }
-    if (remaining <= 0) {
-      finish();
-      return;
-    }
-    remaining--;
-  }
-
   function finish() {
-    clearInterval(timer);
+    if (worker) { worker.terminate(); worker = null; }
     running = false;
     display.classList.remove('urgent');
     display.classList.add('done');
@@ -295,13 +326,13 @@
     const ctx = new (window.AudioContext || window.webkitAudioContext)();
 
     const beeps = [
-      { freq: 880, start: 0,    dur: 0.12 },
-      { freq: 880, start: 0.15, dur: 0.12 },
-      { freq: 1320,start: 0.30, dur: 0.55 },
+      { freq: 880,  start: 0,    dur: 0.12 },
+      { freq: 880,  start: 0.15, dur: 0.12 },
+      { freq: 1320, start: 0.30, dur: 0.55 },
     ];
 
     beeps.forEach(({ freq, start, dur }) => {
-      const osc = ctx.createOscillator();
+      const osc  = ctx.createOscillator();
       const gain = ctx.createGain();
       osc.connect(gain);
       gain.connect(ctx.destination);
