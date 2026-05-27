@@ -201,51 +201,107 @@
 
 <script>
   const CIRCUMFERENCE = 2 * Math.PI * 88;
-  const ring = document.getElementById('ring');
+  const ring    = document.getElementById('ring');
   const display = document.getElementById('display');
   const startBtn = document.getElementById('startBtn');
   ring.style.strokeDasharray = CIRCUMFERENCE;
 
   let totalSeconds = 180;
-  let remaining = 180;
-  let running = false;
-  let worker = null;
-  let audioContext = null;
-  let audioUnlocked = false;
+  let remaining    = 180;
+  let running      = false;
+  let worker       = null;
 
-  function unlockAudioContext() {
-    if (audioUnlocked) return;
-    const AudioContext = window.AudioContext || window.webkitAudioContext;
-    if (!AudioContext) return;
-    audioContext = new AudioContext();
-    if (audioContext.state === 'suspended') {
-      audioContext.resume().catch(() => {});
+  // =====================================================================
+  // iOS Safari / PWA 音声アンロック戦略
+  // =====================================================================
+  // iOS の制限：
+  //   1. AudioContext は生成直後 state === 'suspended' で停止している
+  //   2. ctx.resume() はユーザージェスチャー（touchstart / click）の
+  //      同期コールスタック内でしか機能しない
+  //   3. バックグラウンド復帰時に再び suspended になることがある
+  //   4. 無音バッファを一度再生しないと古い iOS では完全にアンロックされない
+  //   5. ハードウェアのサイレントスイッチ：
+  //      - <audio> / <video> 要素 → サイレント時は無音
+  //      - WebAudio API (AudioContext) → iOS 13+ ではサイレント無関係に鳴る ✅
+  //      → MP3 ではなく WebAudio API を使う理由はここにある
+  //
+  // 解決策：
+  //   ・スタートボタン押下（= ユーザージェスチャー内）で resume() + 無音再生
+  //   ・作成した ctx を使い回し、アラーム時は ctx が running 状態を前提とする
+  //   ・visibilitychange で復帰時にも resume() を試みる
+  // =====================================================================
+
+  const AC = window.AudioContext || window.webkitAudioContext;
+  let audioCtx = null;          // シングルトン。一度作ったら使い回す
+  let audioReady = false;       // 無音バッファ再生まで完了したか
+
+  /**
+   * ユーザージェスチャー内から呼ぶ。
+   * AudioContext の生成・resume・無音バッファ再生 をすべて行う。
+   */
+  async function ensureAudioUnlocked() {
+    if (!AC) return;
+
+    // 初回のみ AudioContext を生成
+    if (!audioCtx) {
+      audioCtx = new AC();
     }
-    audioUnlocked = true;
+
+    // suspended なら resume（ジェスチャー内でないと iOS では効かない）
+    if (audioCtx.state === 'suspended') {
+      try {
+        await audioCtx.resume();
+      } catch (e) {
+        console.warn('AudioContext resume failed:', e);
+        return;
+      }
+    }
+
+    // running になったら無音バッファで完全アンロック（iOS 旧バージョン対策）
+    if (audioCtx.state === 'running' && !audioReady) {
+      const silentBuf = audioCtx.createBuffer(1, 1, audioCtx.sampleRate);
+      const src = audioCtx.createBufferSource();
+      src.buffer = silentBuf;
+      src.connect(audioCtx.destination);
+      src.start(0);
+      audioReady = true;
+    }
   }
 
-  document.body.addEventListener('click', unlockAudioContext, { once: true, passive: true });
-  document.body.addEventListener('touchstart', unlockAudioContext, { once: true, passive: true });
+  // バックグラウンド復帰時（PWA スリープ後など）に suspended に戻ることがある
+  // → 再びアクティブになった瞬間に resume を試みる
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'visible' && audioCtx && audioCtx.state === 'suspended') {
+      audioCtx.resume().catch(() => {});
+    }
+  });
 
+  // PWA ホーム画面起動直後は初回タップ前まで suspended のまま。
+  // bodyへの最初のタッチでも unlock を試みることで
+  // ユーザーがスタートボタン以外を先にタップした場合もカバーする。
+  document.body.addEventListener('touchstart', ensureAudioUnlocked, { passive: true });
+  document.body.addEventListener('click',      ensureAudioUnlocked, { passive: true });
+
+  // ---- Service Worker --------------------------------------------------
   if ('serviceWorker' in navigator) {
-    window.addEventListener('load', function() {
-      navigator.serviceWorker.register('./sw.js').catch(function(err) {
+    window.addEventListener('load', function () {
+      navigator.serviceWorker.register('./sw.js').catch(function (err) {
         console.warn('ServiceWorker registration failed:', err);
       });
     });
   }
 
-  window.addEventListener('appinstalled', function() {
+  window.addEventListener('appinstalled', function () {
     console.log('PWA installed');
   });
 
-  // ---- Web Worker (inline via Blob) --------------------------------
+  // ---- Web Worker (inline via Blob) ------------------------------------
   // バックグラウンドタブでも throttle されない独立スレッドで動作する。
-  // さらに Date.now() で実経過時間を測るため、インターバル自体がズレても
+  // Date.now() で実経過時間を測るため、インターバルがズレても
   // 表示される残り秒数は常に正確に保たれる。
   const workerCode = `
     let intervalId = null;
-    let deadline = 0;   // 終了予定の Date.now() 値
+    let deadline = 0;
 
     self.onmessage = function(e) {
       if (e.data.type === 'start') {
@@ -260,20 +316,20 @@
             clearInterval(intervalId);
             self.postMessage({ type: 'done' });
           }
-        }, 250);   // 250ms ポーリングで 1 秒単位の切り替わりを確実に捉える
+        }, 250);  // 250ms ポーリングで 1 秒単位の切り替わりを確実に捉える
 
       } else if (e.data.type === 'stop') {
         clearInterval(intervalId);
       }
     };
   `;
-  const blob = new Blob([workerCode], { type: 'application/javascript' });
+  const blob      = new Blob([workerCode], { type: 'application/javascript' });
   const workerUrl = URL.createObjectURL(blob);
 
   function createWorker() {
     if (worker) worker.terminate();
     worker = new Worker(workerUrl);
-    worker.onmessage = function(e) {
+    worker.onmessage = function (e) {
       if (e.data.type === 'tick') {
         remaining = e.data.remaining;
         updateDisplay();
@@ -287,32 +343,40 @@
       }
     };
   }
-  // ------------------------------------------------------------------
+  // ----------------------------------------------------------------------
 
   function setPreset(minutes, evt) {
     if (running) return;
     document.querySelectorAll('.preset-btn').forEach(b => b.classList.remove('active'));
     if (evt && evt.target) evt.target.classList.add('active');
     totalSeconds = minutes * 60;
-    remaining = totalSeconds;
+    remaining    = totalSeconds;
     updateDisplay();
     resetRing();
+    // プリセットタップもジェスチャーなのでここでもアンロック
+    ensureAudioUnlocked();
   }
 
   function adjust(seconds) {
     if (running) return;
     totalSeconds = Math.max(30, totalSeconds + seconds);
-    remaining = totalSeconds;
+    remaining    = totalSeconds;
     document.querySelectorAll('.preset-btn').forEach(b => b.classList.remove('active'));
     updateDisplay();
     resetRing();
+    ensureAudioUnlocked();
   }
 
   function toggle() {
     running ? reset() : start();
   }
 
-  function start() {
+  async function start() {
+    // ★ iOS 最重要ポイント：
+    //    ユーザージェスチャー（スタートボタン押下）の同期コールスタック内で
+    //    resume() を呼ぶ。await の前に AudioContext 生成・resume を完了させる。
+    await ensureAudioUnlocked();
+
     running = true;
     startBtn.textContent = 'リセット';
     startBtn.classList.add('running');
@@ -326,7 +390,7 @@
 
   function reset() {
     if (worker) { worker.postMessage({ type: 'stop' }); worker.terminate(); worker = null; }
-    running = false;
+    running   = false;
     remaining = totalSeconds;
     updateDisplay();
     resetRing();
@@ -363,19 +427,49 @@
     ring.style.strokeDashoffset = 0;
   }
 
+  /**
+   * WebAudio API でビープ音を生成して再生する。
+   *
+   * ★ この関数はタイマー終了時（= Workerのメッセージ受信 = ジェスチャー外）
+   *    から呼ばれる。そのため ctx.resume() はここでは効かない。
+   *    スタートボタン押下時に ensureAudioUnlocked() で完全に running に
+   *    しておくことが前提。
+   *
+   * サイレントスイッチについて：
+   *   WebAudio API は iOS 13+ でサイレントスイッチの影響を受けない。
+   *   ただしユーザーが音量を 0 にしていれば当然無音になる（仕様）。
+   */
   function playAlarm() {
-    if (!audioUnlocked) {
-      unlockAudioContext();
-    }
-    const ctx = audioContext || new (window.AudioContext || window.webkitAudioContext)();
-    if (ctx.state === 'suspended') {
-      ctx.resume().catch(() => {});
+    if (!audioCtx) {
+      // スタートが押されていれば必ず存在するはず。念のため。
+      console.warn('AudioContext が初期化されていません。スタートボタンを押してください。');
+      return;
     }
 
+    // バックグラウンド復帰直後などで suspended になっていれば
+    // 再生を少し遅らせて resume を試みる（ジェスチャー外なので成功しない
+    // こともあるが、試みるだけ試みる）
+    if (audioCtx.state !== 'running') {
+      audioCtx.resume().then(() => scheduleBeeps(audioCtx)).catch(() => {});
+      return;
+    }
+
+    scheduleBeeps(audioCtx);
+  }
+
+  /**
+   * 実際のビープ音スケジューリング。
+   * ctx が running 状態であることを前提として呼ぶ。
+   *
+   * 音の構成：
+   *   ・880 Hz (ラ)  × 2回 → 注意を引く短いビープ
+   *   ・1320 Hz (ミ) × 1回 → 高めの余韻で終了を知らせる
+   */
+  function scheduleBeeps(ctx) {
     const beeps = [
       { freq: 880,  start: 0,    dur: 0.12 },
-      { freq: 880,  start: 0.15, dur: 0.12 },
-      { freq: 1320, start: 0.30, dur: 0.55 },
+      { freq: 880,  start: 0.18, dur: 0.12 },
+      { freq: 1320, start: 0.36, dur: 0.60 },
     ];
 
     beeps.forEach(({ freq, start, dur }) => {
@@ -383,16 +477,22 @@
       const gain = ctx.createGain();
       osc.connect(gain);
       gain.connect(ctx.destination);
+
       osc.type = 'sine';
       osc.frequency.value = freq;
+
       const t = ctx.currentTime + start;
+      // アタック：急峻なクリックノイズを避けるため 10ms でフェードイン
       gain.gain.setValueAtTime(0, t);
-      gain.gain.linearRampToValueAtTime(0.4, t + 0.01);
-      gain.gain.exponentialRampToValueAtTime(0.001, t + dur);
+      gain.gain.linearRampToValueAtTime(0.45, t + 0.01);
+      // ディケイ：自然な余韻でフェードアウト
+      gain.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+
       osc.start(t);
       osc.stop(t + dur + 0.05);
     });
 
+    // 2 秒後に done スタイルをリセット
     setTimeout(() => {
       display.classList.remove('done');
       ring.classList.remove('done');
