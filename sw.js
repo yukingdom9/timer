@@ -1,21 +1,25 @@
 // =====================================================================
-// Service Worker — timer-pwa-v2
+// Service Worker — timer-pwa-v3
 // =====================================================================
 //
 // ■ キャッシュ戦略
 //   index.html → Network First（常に最新 JS を取得、オフライン時のみキャッシュ）
 //   静的アセット → Cache First（高速化）
 //
-// ■ v1 → v2 に変更した理由
-//   v1 のキャッシュが残っていると修正した index.html が PWA に届かない。
+// ■ v2 → v3 に変更した理由
+//   CSS / JS を外部ファイルに分離したため、新規ファイルを STATIC_ASSETS に追加。
 //   バージョンを変えることで activate 時に古いキャッシュを削除し、
-//   新しいファイルが確実に読み込まれるようにする。
+//   新しいファイル構成が確実に読み込まれるようにする。
 // =====================================================================
 
-var CACHE_NAME   = 'timer-pwa-v2';
-var OFFLINE_URL  = './index.html';
+var CACHE_NAME    = 'timer-pwa-v3';
+var OFFLINE_URL   = './index.html';
 var STATIC_ASSETS = [
   './manifest.json',
+  './style.css',
+  './js/audio.js',
+  './js/timer.js',
+  './js/app.js',
   './icons/icon.svg',
   './icons/apple-touch-icon.svg'
 ];
@@ -30,7 +34,7 @@ self.addEventListener('install', function (event) {
   );
 });
 
-// activate: 古いキャッシュ（v1 など）をすべて削除してから制御を引き継ぐ
+// activate: 古いキャッシュ（v1, v2 など）をすべて削除してから制御を引き継ぐ
 self.addEventListener('activate', function (event) {
   event.waitUntil(
     caches.keys().then(function (keys) {
@@ -49,7 +53,7 @@ self.addEventListener('activate', function (event) {
 self.addEventListener('fetch', function (event) {
   if (event.request.method !== 'GET') return;
 
-  var url = new URL(event.request.url);
+  var url    = new URL(event.request.url);
   var isHTML = url.pathname.endsWith('.html') ||
                url.pathname.endsWith('/') ||
                url.pathname === '/';
@@ -60,14 +64,12 @@ self.addEventListener('fetch', function (event) {
     // オフライン時のみキャッシュを返す。
     event.respondWith(
       fetch(event.request).then(function (response) {
-        // 成功したらキャッシュを更新してから返す
         var copy = response.clone();
         caches.open(CACHE_NAME).then(function (cache) {
           cache.put(event.request, copy);
         });
         return response;
       }).catch(function () {
-        // オフライン: キャッシュから返す
         return caches.match(OFFLINE_URL);
       })
     );
